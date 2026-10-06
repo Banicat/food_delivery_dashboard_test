@@ -74,6 +74,17 @@ def load_data():
 
 df = load_data()                           # 주 × 플랫폼 × 유입 경로별 세션 퍼널
 
+AI_NOTES = {
+    "전체": "전체 28,840개 세션 중 주문 전환율은 14.5%이며, 조회에서 장바구니로 이어지는 단계의 전환율이 41.4%로 가장 낮았다. 다른 집단들의 기준이 되는 전체 평균 흐름을 보여준다. 초기 유입 단계에서의 이탈 원인 파악이 필요하다.",
+    "Android": "16,053개 세션으로 주문 전환율은 14.3%이며, 최저 단계는 41.8%의 장바구니 전환율을 기록했다. 2026-04-13 주부터 2026-06-01 주까지 결제 전환율이 크게 낮아지고 결제실패 이벤트가 급증했다. 해당 기간 동안 결제 프로세스에 기술적 문제가 있었던 것으로 보인다.",
+    "iOS": "12,787개 세션으로 주문 전환율은 14.8%이며, 장바구니 전환율이 40.8%로 가장 낮았다. 전체 평균과 유사한 주문 전환율을 보였으나 결제 전환율은 85.5%로 안드로이드 대비 다소 높았다. 플랫폼별 결제 환경의 차이가 영향을 미쳤을 것으로 보인다.",
+    "organic": "22,489개 세션으로 전체의 다수를 차지하며 주문 전환율은 16.0%로 전체 평균 대비 높았다. 장바구니 전환율은 41.4%로 가장 낮았으며, 결제 전환율은 80.4%를 기록했다. 자연 유입 사용자의 서비스 이용 의도가 비교적 높았던 것으로 보인다.",
+    "paid_ad": "1,595개 세션으로 주문 전환율은 26.3%, 결제 전환율은 90.3%를 기록해 다른 유입경로 대비 성과가 가장 우수했다. 가장 낮은 단계인 장바구니 전환율도 53.7%로 전체 평균을 상회했다. 광고를 통해 유입된 사용자의 구매 전환 성향이 뚜렷했던 것으로 보인다.",
+    "push": "4,635개 세션으로 주문 전환율은 3.2%, 결제 전환율은 63.8%로 다른 경로에 비해 낮았다. 세션에서 조회로 이어지는 단계의 전환율이 28.4%로 전 구간 중 가장 낮았다. 푸시 메시지를 통해 유입된 사용자의 콘텐츠 관심도가 상대적으로 낮았던 것으로 보인다.",
+    "referral": "세션 수가 121개로 500개 미만이며 주문 전환율과 결제 전환율 모두 0.0%를 기록했다. 결제시작에서 주문으로 이어지는 단계의 전환율이 0.0%로 가장 낮았다. 표본 크기가 매우 작아 해당 경로의 성과를 단정하기 어렵다.",
+}
+AI_SOURCE = "🤖 Gemini가 미리 만든 해설 · 전체 기간 기준"
+
 # ------------------------------------------------------------
 # 사이드바 필터
 # ------------------------------------------------------------
@@ -105,12 +116,25 @@ selected_traffic = st.sidebar.multiselect(
     default=traffic_options
 )
 
-# 필터 적용 데이터 f 생성
-f = df[
-    (df["주시작일"] >= selected_dates[0]) &
-    (df["주시작일"] <= selected_dates[1]) &
+# 평소 범위 기준 기간 (select_slider)
+default_baseline_end_idx = min(25, len(date_options) - 1)
+baseline_dates = st.sidebar.select_slider(
+    "평소 범위 기준 기간",
+    options=date_options,
+    value=(date_options[0], date_options[default_baseline_end_idx]),
+    help="문제가 없던 기간을 고르세요. 이 기간의 주별 값 범위를 '평소 범위'로 씁니다."
+)
+
+# 집단 조건(플랫폼·유입경로)만 적용한 데이터 g 생성
+g = df[
     (df["플랫폼"].isin(selected_platforms)) &
     (df["유입경로"].isin(selected_traffic))
+]
+
+# 기존 f는 g에 기간 조건을 더해 만듦
+f = g[
+    (g["주시작일"] >= selected_dates[0]) &
+    (g["주시작일"] <= selected_dates[1])
 ]
 
 # f가 비어 있는 경우 처리
@@ -129,6 +153,70 @@ c1, c2, c3 = st.columns(3)
 c1.metric("세션 수", f"{t['세션수']:,}개")
 c2.metric("주문 전환율 (방문 → 주문)", f"{rate(t['주문세션'], t['세션수']):.1f}%")
 c3.metric("결제 전환율 (결제 시작 → 주문)", f"{rate(t['주문세션'], t['결제시작세션']):.1f}%")
+
+# ------------------------------------------------------------
+# 규칙 기반 설명 문장 (st.info)
+# ------------------------------------------------------------
+def generate_explanation(metric_type):
+    # 선택 기간의 주 목록 정렬
+    selected_weeks = sorted(f["주시작일"].unique())
+    if len(selected_weeks) < 4:
+        return "비교하려면 선택 기간을 4주 이상 골라 주세요"
+    
+    # 마지막 4주 기간
+    last_4_weeks = selected_weeks[-4:]
+    start_week_str = last_4_weeks[0].strftime("%Y-%m-%d")
+    
+    # g 데이터를 이용해 기준 기간(baseline_dates) 내 주별 전환율 계산 (분모 0 제외)
+    g_base = g[(g["주시작일"] >= baseline_dates[0]) & (g["주시작일"] <= baseline_dates[1])]
+    
+    # 주별 집계
+    weekly_base = g_base.groupby("주시작일")[["세션수", "결제시작세션", "주문세션"]].sum().reset_index()
+    
+    base_rates = []
+    for _, row in weekly_base.iterrows():
+        if metric_type == "payment":
+            den = row["결제시작세션"]
+            num = row["주문세션"]
+        else:
+            den = row["세션수"]
+            num = row["주문세션"]
+        if den > 0:
+            base_rates.append(num / den * 100)
+            
+    if len(base_rates) < 4:
+        return "기준 기간을 이 집단의 데이터가 있는 시기로 옮겨 주세요"
+        
+    min_rate = min(base_rates)
+    max_rate = max(base_rates)
+    
+    # 이번 값: f의 마지막 4주 합계로 계산
+    f_last_4 = f[f["주시작일"].isin(last_4_weeks)][["세션수", "결제시작세션", "주문세션"]].sum()
+    if metric_type == "payment":
+        current_val = rate(f_last_4["주문세션"], f_last_4["결제시작세션"])
+        name_str = "결제 전환율"
+    else:
+        current_val = rate(f_last_4["주문세션"], f_last_4["세션수"])
+        name_str = "주문 전환율"
+        
+    if current_val < min_rate:
+        diff = min_rate - current_val
+        status = f"평소 범위({min_rate:.1f}% ~ {max_rate:.1f}%)보다 {diff:.1f}%p 낮습니다."
+    elif current_val > max_rate:
+        diff = current_val - max_rate
+        status = f"평소 범위({min_rate:.1f}% ~ {max_rate:.1f}%)보다 {diff:.1f}%p 높습니다."
+    else:
+        status = f"평소 범위({min_rate:.1f}% ~ {max_rate:.1f}%) 안에 있습니다."
+        
+    return f"{start_week_str} 주부터 4주간 {name_str}은 {current_val:.1f}%로, {status}"
+
+st.info(generate_explanation("payment"))
+st.info(generate_explanation("order"))
+st.caption(f"📏 자동 계산 · 평소 범위 기준 기간 {baseline_dates[0]} ~ {baseline_dates[1]} (주별 값)")
+
+with st.expander("🤖 AI 해설 · 전체", expanded=False):
+    st.write(AI_NOTES.get("전체", "이 집단의 해설은 아직 없습니다."))
+st.caption(AI_SOURCE)
 
 st.divider()
 
@@ -325,3 +413,8 @@ fig_drill2 = px.bar(
 fig_drill2.update_layout(yaxis_title="결제실패 건수", xaxis_title="")
 st.plotly_chart(fig_drill2, width="stretch")
 st.caption("문제가 생긴 시점과 함께 움직였다면 원인 후보입니다. 함께 움직였다고 원인이 확정되지는 않습니다.")
+
+target = selected_group
+with st.expander(f"🤖 AI 해설 · {target}", expanded=False):
+    st.write(AI_NOTES.get(target, "이 집단의 해설은 아직 없습니다."))
+st.caption(AI_SOURCE)
